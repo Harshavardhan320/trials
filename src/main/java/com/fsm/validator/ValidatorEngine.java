@@ -1,5 +1,6 @@
-package main.java.com.fsm.validator;
+package com.fsm.validator;
 
+import com.fsm.validator.MissingFileProcessor;
 import com.fsm.validator.models.FileInfo;
 import com.fsm.validator.models.ValidationResult;
 

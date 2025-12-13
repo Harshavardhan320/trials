@@ -1,4 +1,4 @@
-package main.java.com.fsm.validator;
+package com.fsm.validator;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
