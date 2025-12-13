@@ -127,7 +127,7 @@ jobs:
         run: |
           set +e
 
-          java -cp "target/classes:target/commit-engine-file-rename-1.0-SNAPSHOT.jar" java.com.fsm.validator.Main \
+          java -cp "target/classes:target/commit-engine-file-rename-1.0-SNAPSHOT.jar" main.java.com.fsm.validator.Main \
             > validator.log 2>&1
 
           EXIT_CODE=$?
