@@ -1,4 +1,4 @@
-package com.fsm.validator;
+package main.java.com.fsm.validator;
 
 import com.fsm.validator.models.FileInfo;
 import com.fsm.validator.models.ValidationResult;

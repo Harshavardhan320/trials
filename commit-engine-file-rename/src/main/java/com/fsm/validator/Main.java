@@ -1,4 +1,4 @@
-package com.fsm.validator;
+package main.java.com.fsm.validator;
 
 public class Main {
     public static void main(String[] args) {

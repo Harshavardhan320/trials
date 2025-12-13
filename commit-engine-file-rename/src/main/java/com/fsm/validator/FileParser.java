@@ -1,4 +1,4 @@
-package com.fsm.validator;
+package main.java.com.fsm.validator;
 
 import com.fsm.validator.models.FileInfo;
 
@@ -13,7 +13,7 @@ public class FileParser {
 
     public FileInfo parse(String fileName, String folder) {
 
-        // holdings.csv special case
+        //holdings.csv special case
         if (fileName.equalsIgnoreCase("holdings.csv")) {
             FileInfo f = new FileInfo();
             f.setOriginalName(fileName);
