@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
 
       # ---------------------------------------------------------
-      # 2) DETECT IF COMMIT TOUCHED ANY TARGET FOLDERS
+      # 2) DETECT CHANGES IN TARGET FOLDERS
       # ---------------------------------------------------------
       - name: Detect changes in target folders
         id: changes
@@ -51,22 +51,22 @@ jobs:
           echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
 
       # ---------------------------------------------------------
-      # 3) IF NO RELEVANT CHANGES → STOP JOB
+      # 3) STOP WORKFLOW IF NO TARGET FOLDER CHANGES (IMPORTANT)
       # ---------------------------------------------------------
-      - name: Skip — No folder changes
+      - name: Stop workflow — No relevant folder changes
         if: steps.changes.outputs.should_run == 'false'
         run: |
-          echo "No daily/weekly/monthly/yearly folder changes — stopping workflow."
-          exit 0
+          echo "No daily/weekly/monthly/yearly folder changes — workflow stopped."
+          exit 1
 
       # ---------------------------------------------------------
-      # 4) CHECK IF ANY OPEN PR MODIFIES THESE FOLDERS
+      # 4) CHECK IF ANY PR TOUCHES 4 FOLDERS
       # ---------------------------------------------------------
-      - name: Check PR existence
+      - name: Check PR existence for target folders
         id: prcheck
+        if: steps.changes.outputs.should_run == 'true'
         run: |
           REPO="${{ github.repository }}"
-
           PR_LIST=$(curl -sS \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
@@ -75,6 +75,7 @@ jobs:
           HAS_PR="false"
 
           for pr in $(echo "$PR_LIST" | jq -r '.[].number'); do
+
             FILES=$(curl -sS \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
@@ -91,48 +92,50 @@ jobs:
           echo "has_pr=$HAS_PR" >> $GITHUB_OUTPUT
 
       # ---------------------------------------------------------
-      # 5) IF A PR EXISTS → STOP + SEND ALERT
+      # 5) PR EXISTS → SEND TELEGRAM + STOP WORKFLOW
       # ---------------------------------------------------------
-      - name: Telegram — PR exists
+      - name: Telegram — PR exists (stop workflow)
         if: steps.prcheck.outputs.has_pr == 'true'
         run: |
-          MSG="❌ Commit rejected — Another PR already modifies stock folders."
+          MSG="❌ Commit rejected — An open PR already modifies daily/weekly/monthly/yearly folders."
           curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
             -d text="$MSG"
-          exit 0
+          exit 1
 
       # ---------------------------------------------------------
-      # 6) SETUP JAVA 21
+      # 6) SETUP JAVA
       # ---------------------------------------------------------
       - name: Set up Java
+        if: steps.changes.outputs.should_run == 'true'
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '21'
 
       # ---------------------------------------------------------
-      # 7) BUILD JAVA VALIDATOR (Correct folder)
+      # 7) BUILD VALIDATOR
       # ---------------------------------------------------------
       - name: Build validator
+        if: steps.changes.outputs.should_run == 'true'
         working-directory: ./commit-engine-file-rename
         run: mvn -q -DskipTests package
 
       # ---------------------------------------------------------
-      # 8) RUN JAVA VALIDATOR (Correct classpath)
+      # 8) RUN VALIDATOR
       # ---------------------------------------------------------
       - name: Run validator
         id: validate
+        if: steps.changes.outputs.should_run == 'true'
         working-directory: ./commit-engine-file-rename
         run: |
           set +e
-
-          java -cp "target/classes:target/commit-engine-file-rename-1.0-SNAPSHOT.jar" main.java.com.fsm.validator.Main \
+          java -cp "target/classes:target/commit-engine-file-rename-1.0-SNAPSHOT.jar" java.com.fsm.validator.Main \
             > validator.log 2>&1
-
+          
           EXIT_CODE=$?
-
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
           echo "log<<EOF" >> $GITHUB_OUTPUT
           cat validator.log >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -140,20 +143,22 @@ jobs:
           exit 0
 
       # ---------------------------------------------------------
-      # 9) VALIDATION FAILED → TELEGRAM ALERT
+      # 9) VALIDATION FAILURE
       # ---------------------------------------------------------
       - name: Telegram — Validation failed
         if: steps.validate.outputs.exit_code != '0'
         run: |
           ERR=$(echo "${{ steps.validate.outputs.log }}" | head -n 1)
           MSG="❌ Commit rejected — Validation failed: $ERR"
+          
           curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
             -d text="$MSG"
+
           exit 1
 
       # ---------------------------------------------------------
-      # 10) SUCCESS → TELEGRAM SUCCESS MESSAGE
+      # 10) VALIDATION SUCCESS
       # ---------------------------------------------------------
       - name: Telegram — Validation success
         if: steps.validate.outputs.exit_code == '0'
@@ -165,6 +170,7 @@ jobs:
           fi
 
           MSG="✅ Validation success — Files updated successfully: $FILES"
+          
           curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
             -d text="$MSG"
