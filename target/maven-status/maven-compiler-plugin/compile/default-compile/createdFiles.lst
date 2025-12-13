@@ -1,0 +1,13 @@
+com/fsm/validator/GitHubService.class
+com/fsm/validator/models/ValidationResult.class
+com/fsm/validator/FileParser.class
+com/fsm/validator/models/FileInfo.class
+com/fsm/validator/FileNameBuilder.class
+com/fsm/validator/SerialGenerator.class
+com/fsm/validator/ValidatorEngine.class
+com/fsm/validator/TimePeriodChecker.class
+com/fsm/validator/FileRenamer.class
+com/fsm/validator/HoldingsProcessor.class
+com/fsm/validator/Main.class
+com/fsm/validator/MissingFileProcessor.class
+com/fsm/validator/Utils.class

@@ -1,0 +1,13 @@
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/FileNameBuilder.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/FileParser.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/FileRenamer.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/GitHubService.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/HoldingsProcessor.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/Main.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/MissingFileProcessor.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/SerialGenerator.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/TimePeriodChecker.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/Utils.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/ValidatorEngine.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/models/FileInfo.java
+/home/runner/work/trials/trials/src/main/java/com/fsm/validator/models/ValidationResult.java
