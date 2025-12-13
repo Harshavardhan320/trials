@@ -1,4 +1,4 @@
-name: FunStock Validator
+name: Performance File Validator
 
 on:
   push:
@@ -10,195 +10,168 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TARGET_FOLDERS: "daily weekly monthly yearly"
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
       TELEGRAM_API:       ${{ secrets.TELEGRAM_API }}
 
     steps:
-
-      # ---------------------------------------------------------
-      # 1) CHECKOUT CODE
-      # ---------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-
-      # ---------------------------------------------------------
-      # 2) DETECT IF COMMIT TOUCHED ANY OF THE 4 FOLDERS
-      # ---------------------------------------------------------
-      - name: Detect changes in target folders
-        id: changes
+      # --------------------------------------------------
+      # 2. Detect relevant folder changes
+      # --------------------------------------------------
+      - name: Detect folder changes
+        id: detect
         run: |
-          # Safe diff for UI, CLI, first commits
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+            FILES=$(git diff --name-only HEAD~1 HEAD)
           else
-            CHANGED_FILES=$(git diff --name-only --cached)
+            FILES=$(git diff --name-only)
           fi
 
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
+          echo "$FILES"
 
-          SHOULD_RUN="false"
-          for folder in $TARGET_FOLDERS; do
-            if echo "$CHANGED_FILES" | grep -q "^${folder}/"; then
-              SHOULD_RUN="true"
+          RUN=false
+          for f in dailyPerformance weeklyPerformance monthlyPerformance yearlyPerformance; do
+            if echo "$FILES" | grep -q "^$f/"; then
+              RUN=true
               break
             fi
           done
 
-          echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
+          echo "run=$RUN" >> $GITHUB_OUTPUT
 
-
-      # ---------------------------------------------------------
-      # 3) IF NO TARGET FOLDER CHANGES → STOP JOB
-      # ---------------------------------------------------------
-      - name: Stop — Commit does not touch required folders
-        if: steps.changes.outputs.should_run == 'false'
+      # --------------------------------------------------
+      # 3. Stop early if no folder touched
+      # --------------------------------------------------
+      - name: Stop – no relevant changes
+        if: steps.detect.outputs.run == 'false'
         run: |
-          echo "⏹ No daily/weekly/monthly/yearly changes — stopping workflow."
+          echo "No performance folders touched. Workflow stopped."
           exit 0
 
-
-      # ---------------------------------------------------------
-      # 4) CHECK IF PR ALREADY EXISTS TOUCHING THESE FOLDERS
-      # ---------------------------------------------------------
-      - name: Check PR existence for target folders
-        id: prcheck
-        if: steps.changes.outputs.should_run == 'true'
+      # --------------------------------------------------
+      # 4. Block if PR exists touching folders
+      # --------------------------------------------------
+      - name: Block if PR exists
         run: |
-          REPO="${{ github.repository }}"
+          python3 << 'EOF'
+          import requests, os, sys
 
-          # Fetch all open PRs
-          PR_LIST=$(curl -sS \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/pulls?state=open")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          headers = {"Authorization": f"Bearer {token}"}
 
-          HAS_PR="false"
+          prs = requests.get(
+            f"https://api.github.com/repos/{repo}/pulls?state=open",
+            headers=headers
+          ).json()
 
-          # For each PR, check modified files
-          for pr in $(echo "$PR_LIST" | jq -r '.[].number'); do
-            FILES=$(curl -sS \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/pulls/$pr/files" \
-              | jq -r '.[].filename')
+          folders = ["dailyPerformance","weeklyPerformance","monthlyPerformance","yearlyPerformance"]
 
-            for folder in daily weekly monthly yearly; do
-              if echo "$FILES" | grep -q "^${folder}/"; then
-                HAS_PR="true"
-                break 2
-              fi
-            done
-          done
+          for pr in prs:
+            files = requests.get(pr["url"] + "/files", headers=headers).json()
+            for f in files:
+              for folder in folders:
+                if f["filename"].startswith(folder + "/"):
+                  msg = "❌ Commit rejected — Existing PR touches performance folders"
+                  requests.post(
+                    os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
+                    data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
+                  )
+                  sys.exit(0)
+          EOF
 
-          echo "has_pr=$HAS_PR" >> $GITHUB_OUTPUT
-
-
-      # ---------------------------------------------------------
-      # 5) PR EXISTS → SEND ALERT + STOP WORKFLOW
-      # ---------------------------------------------------------
-      - name: Telegram — PR exists (stop workflow)
-        if: steps.prcheck.outputs.has_pr == 'true'
+      # --------------------------------------------------
+      # 5. Validate & Rename using Python
+      # --------------------------------------------------
+      - name: Validate and rename files
+        id: rename
         run: |
-          MSG="❌ Commit rejected — Open PR already touches daily/weekly/monthly/yearly folders."
+          python3 << 'EOF'
+          import os, re, sys, datetime, calendar, subprocess
+
+          ROOT = os.getcwd()
+          FOLDERS = {
+            "dailyPerformance": "day",
+            "weeklyPerformance": "week",
+            "monthlyPerformance": "month",
+            "yearlyPerformance": "year"
+          }
+
+          today = datetime.date.today()
+          weekday = today.weekday()  # Mon=0
+
+          renamed = []
+
+          for folder, typ in FOLDERS.items():
+            path = os.path.join(ROOT, folder)
+            files = [f for f in os.listdir(path) if f.endswith(".csv")]
+
+            # highest serial
+            serials = []
+            for f in files:
+              m = re.match(r"(\d+)\s", f)
+              if m:
+                serials.append(int(m.group(1)))
+            next_serial = max(serials, default=0) + 1
+
+            for f in files:
+              if f == "holdings.csv":
+                if typ == "day" and weekday >= 5:
+                  raise SystemExit("Daily holdings not allowed on weekend")
+
+                year = today.year
+                month = today.strftime("%b")
+
+                if typ == "day":
+                  period = f"{today.day}_day"
+                elif typ == "week":
+                  week = (today.day - 1) // 5 + 1
+                  period = f"{week}_week"
+                elif typ == "month":
+                  period = f"{today.month}_month"
+                else:
+                  period = "1_year"
+
+                new_name = f"{next_serial} {year} {period} {month}.csv"
+
+              else:
+                if re.match(r"\d+\s\d{4}\s", f):
+                  continue  # already proper
+                year, rest = f.split(" ", 1)
+                new_name = f"{next_serial} {year} {rest}"
+
+              old = os.path.join(path, f)
+              new = os.path.join(path, new_name)
+
+              if os.path.exists(new):
+                raise SystemExit(f"Duplicate filename: {new_name}")
+
+              os.rename(old, new)
+              renamed.append(f"{folder}/{new_name}")
+              next_serial += 1
+
+          if renamed:
+            subprocess.run(["git", "add", "-A"])
+            msg = ", ".join(renamed)
+            subprocess.run(["git", "commit", "-m", f"{msg} + Updated + {today.strftime('%d/%m/%Y')}"])
+            subprocess.run(["git", "push"])
+
+          print("Renamed:", renamed)
+          EOF
+
+      # --------------------------------------------------
+      # 6. Telegram success
+      # --------------------------------------------------
+      - name: Telegram success
+        if: success()
+        run: |
           curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
-            -d text="$MSG"
-          exit 0
-
-
-      # ---------------------------------------------------------
-      # 6) SETUP JAVA 21
-      # ---------------------------------------------------------
-      - name: Set up Java 21
-        if: steps.changes.outputs.should_run == 'true'
-        uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-
-      # ---------------------------------------------------------
-      # 7) BUILD VALIDATOR (MAVEN)
-      # ---------------------------------------------------------
-      - name: Build validator
-        if: steps.changes.outputs.should_run == 'true'
-        run: mvn -q -DskipTests package
-
-
-      # ---------------------------------------------------------
-      # 8) RUN VALIDATOR
-      # ---------------------------------------------------------
-      - name: Run validator
-        id: validate
-        if: steps.changes.outputs.should_run == 'true'
-        run: |
-          set +e
-
-          java -cp "target/classes:target/classes" com.fsm.validator.Main \
-            > validator.log 2>&1
-
-          EXIT_CODE=$?
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          echo "log<<EOF" >> $GITHUB_OUTPUT
-          cat validator.log >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          exit 0
-
-      # ---------------------------------------------------------
-      # 9) VALIDATION FAILED → SEND SMS + STOP
-      # ---------------------------------------------------------
-      - name: Telegram — Validation failed
-        if: steps.validate.outputs.exit_code != '0'
-        run: |
-          ERR=$(echo "${{ steps.validate.outputs.log }}" | head -n 1)
-          MSG="❌ Commit rejected — Validation failed: $ERR"
-          curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
-            -d chat_id="$TELEGRAM_CHAT_ID" \
-            -d text="$MSG"
-          exit 1
-
-      # ---------------------------------------------------------
-      # 10) VALIDATION PASSED → SEND SMS
-      # ---------------------------------------------------------
-      - name: Telegram — Validation success
-        if: steps.validate.outputs.exit_code == '0'
-        run: |
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            FILES=$(git diff --name-only HEAD~1 HEAD | paste -sd "," -)
-          else
-            FILES=$(git diff --name-only --cached | paste -sd "," -)
-          fi
-
-          MSG="✅ Validation success — Files updated: $FILES"
-          curl -s -X POST "$TELEGRAM_API$TELEGRAM_BOT_TOKEN/sendMessage" \
-            -d chat_id="$TELEGRAM_CHAT_ID" \
-            -d text="$MSG"
-
-
-      # ---------------------------------------------------------
-      # 11) AUTO-COMMIT FILE RENAMES BY THE VALIDATOR
-      # ---------------------------------------------------------
-      - name: Auto-commit renamed files
-        if: steps.validate.outputs.exit_code == '0'
-        run: |
-          git config user.email "github-actions@github.com"
-          git config user.name  "GitHub Actions Bot"
-
-          git add -A
-
-          if git diff-index --quiet HEAD; then
-            echo "No renamed files to commit."
-          else
-            DATE=$(date +"%d/%m/%Y")
-            FILES=$(git diff --name-only --cached | paste -sd "," -)
-            MSG="$FILES + Updated + $DATE"
-            git commit -m "$MSG"
-            git push
-          fi
+            -d text="✅ Validation success — Files renamed and committed"
