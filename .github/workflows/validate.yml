@@ -57,7 +57,7 @@ jobs:
         if: steps.changes.outputs.should_run == 'false'
         run: |
           echo "No daily/weekly/monthly/yearly folder changes — workflow stopped."
-          exit 1
+          exit 0
 
       # ---------------------------------------------------------
       # 4) CHECK IF ANY PR TOUCHES 4 FOLDERS
