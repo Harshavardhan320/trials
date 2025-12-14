@@ -9,14 +9,20 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # REQUIRED to push rename commit
+      contents: write   # REQUIRED for pushing renamed files
 
     steps:
+      # ---------------------------------------------------------
+      # 1) CHECKOUT CODE
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ---------------------------------------------------------
+      # 2) RENAME + VALIDATE + COMMIT
+      # ---------------------------------------------------------
       - name: Rename and validate CSV files
         env:
           TELEGRAM_API: ${{ secrets.TELEGRAM_API }}
@@ -28,36 +34,53 @@ jobs:
 
           ROOT = os.getcwd()
           today = datetime.date.today()
+          now = datetime.datetime.now().strftime("%d-%b-%Y %I:%M %p IST")
           weekday = today.weekday()  # Mon=0
-          date_str = today.strftime("%d-%b-%Y")
 
           folders = {
-            "dailyPerformance": "day",
-            "weeklyPerformance": "week",
-            "monthlyPerformance": "month",
-            "yearlyPerformance": "year"
+              "dailyPerformance": "day",
+              "weeklyPerformance": "week",
+              "monthlyPerformance": "month",
+              "yearlyPerformance": "year"
           }
 
           renamed = []
 
+          # -----------------------------------------------------
+          # TELEGRAM SEND
+          # -----------------------------------------------------
           def send(msg):
               requests.post(
-                  os.environ["TELEGRAM_API"] +
-                  os.environ["TELEGRAM_BOT_TOKEN"] +
-                  "/sendMessage",
-                  data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
+                  os.environ["TELEGRAM_API"]
+                  + os.environ["TELEGRAM_BOT_TOKEN"]
+                  + "/sendMessage",
+                  data={
+                      "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+                      "text": msg
+                  }
               )
 
+          # -----------------------------------------------------
+          # FAIL (REJECT COMMIT)
+          # -----------------------------------------------------
           def fail(folder, file, reason):
               send(
-                  f"❌ COMMIT REJECTED\n\n"
-                  f"Date: {date_str}\n"
-                  f"Folder: {folder}\n"
-                  f"File: {file}\n\n"
-                  f"Reason:\n{reason}"
+                  "Subject: ❌ Commit Rejected – Validation Failed\n\n"
+                  "Hello Team,\n\n"
+                  "The commit operation has been rejected due to a validation error.\n\n"
+                  f"📅 Date       : {now.split()[0]}\n"
+                  f"⏰ Time       : {' '.join(now.split()[1:])}\n"
+                  f"📁 Folder     : {folder}\n"
+                  f"📄 File       : {file}\n\n"
+                  f"❗ Reason:\n{reason}\n\n"
+                  "Please correct the issue and retry the commit.\n\n"
+                  "Regards,\nCommit Engine Automation"
               )
               sys.exit(1)
 
+          # -----------------------------------------------------
+          # PROCESS EACH FOLDER
+          # -----------------------------------------------------
           for folder, ftype in folders.items():
               path = os.path.join(ROOT, folder)
               if not os.path.isdir(path):
@@ -65,23 +88,24 @@ jobs:
 
               files = [f for f in os.listdir(path) if f.lower().endswith(".csv")]
 
-              # find highest existing SERIAL (only files that START with serial + year)
+              # Find highest SERIAL (only valid serial files)
               serials = []
               for f in files:
                   m = re.match(r"^(\d+)\s\d{4}\s", f)
                   if m:
                       serials.append(int(m.group(1)))
-              next_serial = max(serials, default=0) + 1
 
+              next_serial = max(serials, default=0) + 1
               periods_seen = set()
 
               for f in files:
                   full = os.path.join(path, f)
 
-                  # ---- HOLDINGS ----
+                  # ---------------- HOLDINGS ----------------
                   if f.lower() == "holdings.csv":
+
                       if ftype == "day" and weekday >= 5:
-                          fail(folder, f, "Daily holdings not allowed on weekend")
+                          fail(folder, f, "Daily holdings upload is not allowed on weekends.")
 
                       year = today.year
                       month = today.strftime("%b")
@@ -95,49 +119,67 @@ jobs:
                       else:
                           period = "1_year"
 
-                  # ---- MISSING FILE (NO SERIAL, YEAR FIRST) ----
+                  # ---------------- MISSING FILE ----------------
                   elif re.match(r"^\d{4}\s\d+_(day|week|month|year)\s[a-zA-Z]+\.csv$", f):
-                      year, period, month = f.replace(".csv","").split()
+                      year, period, month = f.replace(".csv", "").split()
 
-                  # ---- ALREADY VALID ----
+                  # ---------------- ALREADY VALID ----------------
                   elif re.match(r"^\d+\s\d{4}\s\d+_(day|week|month|year)\s[a-zA-Z]+\.csv$", f):
                       continue
 
+                  # ---------------- INVALID ----------------
                   else:
-                      fail(folder, f, "Invalid filename format")
+                      fail(folder, f, "Invalid filename format.")
 
+                  # Duplicate time-period check
                   key = f"{year}_{period}_{month}"
                   if key in periods_seen:
-                      fail(folder, f, "Duplicate time period detected")
+                      fail(folder, f, "Duplicate time period detected.")
                   periods_seen.add(key)
 
+                  # Build final name
                   new_name = f"{next_serial} {year} {period} {month}.csv"
                   new_path = os.path.join(path, new_name)
 
                   if os.path.exists(new_path):
-                      fail(folder, new_name, "Final filename already exists")
+                      fail(folder, new_name, "Final filename already exists.")
 
                   os.rename(full, new_path)
                   renamed.append(f"{folder}/{new_name}")
                   next_serial += 1
 
+          # -----------------------------------------------------
+          # IF NOTHING RENAMED → EXIT
+          # -----------------------------------------------------
           if not renamed:
-              print("No files renamed.")
               sys.exit(0)
 
+          # -----------------------------------------------------
           # COMMIT & PUSH
+          # -----------------------------------------------------
           subprocess.run(["git", "config", "user.name", "GitHub Actions"], check=True)
           subprocess.run(["git", "config", "user.email", "actions@github.com"], check=True)
           subprocess.run(["git", "add", "-A"], check=True)
-          subprocess.run(
-              ["git", "commit", "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"],
-              check=True
-          )
+
+          commit_msg = f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"
+          subprocess.run(["git", "commit", "-m", commit_msg], check=True)
           subprocess.run(["git", "push"], check=True)
 
+          # -----------------------------------------------------
+          # SUCCESS TELEGRAM MESSAGE
+          # -----------------------------------------------------
+          folders_used = sorted(set(f.split("/")[0] for f in renamed))
+
           send(
-              f"✅ COMMIT SUCCESSFUL\n\n"
-              f"Date: {date_str}\n\n"
-              f"Files renamed:\n" + "\n".join(renamed)
+              "Subject: ✅ Commit Successful – File Renaming Completed\n\n"
+              "Hello Team,\n\n"
+              "The commit operation has been completed successfully.\n\n"
+              f"📅 Date       : {now.split()[0]}\n"
+              f"⏰ Time       : {' '.join(now.split()[1:])}\n"
+              f"📁 Folder(s)  : {', '.join(folders_used)}\n"
+              "🔧 Action     : File renaming and serial number assignment\n\n"
+              "📄 Files Processed:\n"
+              + "\n".join(f"- {f}" for f in renamed) +
+              "\n\nRegards,\nCommit Engine Automation"
           )
           EOF
