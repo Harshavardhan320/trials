@@ -16,14 +16,15 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # 1. Checkout
+      # 1. Checkout repository
       # --------------------------------------------------
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
       # --------------------------------------------------
-      # 2. Detect relevant folder changes
+      # 2. Detect if performance folders changed
       # --------------------------------------------------
       - name: Detect folder changes
         id: detect
@@ -47,123 +48,135 @@ jobs:
           echo "run=$RUN" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------
-      # 3. Stop early if no folder touched
+      # 3. Stop if no relevant folder touched
       # --------------------------------------------------
-      - name: Stop – no relevant changes
+      - name: Stop early
         if: steps.detect.outputs.run == 'false'
         run: |
           echo "No performance folders touched. Workflow stopped."
           exit 0
 
       # --------------------------------------------------
-      # 4. Block if PR exists touching folders
+      # 4. Block commit if PR already exists
       # --------------------------------------------------
       - name: Block if PR exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 << 'EOF'
           import requests, os, sys
 
           repo = os.environ["GITHUB_REPOSITORY"]
           token = os.environ["GITHUB_TOKEN"]
-          headers = {"Authorization": f"Bearer {token}"}
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json"
+          }
 
           prs = requests.get(
-            f"https://api.github.com/repos/{repo}/pulls?state=open",
-            headers=headers
+              f"https://api.github.com/repos/{repo}/pulls?state=open",
+              headers=headers
           ).json()
 
-          folders = ["dailyPerformance","weeklyPerformance","monthlyPerformance","yearlyPerformance"]
+          folders = [
+              "dailyPerformance",
+              "weeklyPerformance",
+              "monthlyPerformance",
+              "yearlyPerformance"
+          ]
 
           for pr in prs:
-            files = requests.get(pr["url"] + "/files", headers=headers).json()
-            for f in files:
-              for folder in folders:
-                if f["filename"].startswith(folder + "/"):
-                  msg = "❌ Commit rejected — Existing PR touches performance folders"
-                  requests.post(
-                    os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
-                    data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
-                  )
-                  sys.exit(0)
+              files = requests.get(pr["url"] + "/files", headers=headers).json()
+              for f in files:
+                  for folder in folders:
+                      if f["filename"].startswith(folder + "/"):
+                          msg = "❌ Commit rejected — Existing PR touches performance folders"
+                          requests.post(
+                              os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
+                              data={
+                                  "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+                                  "text": msg
+                              }
+                          )
+                          sys.exit(0)
           EOF
 
       # --------------------------------------------------
-      # 5. Validate & Rename using Python
+      # 5. Validate + rename files (Python)
       # --------------------------------------------------
-      - name: Validate and rename files
-        id: rename
+      - name: Validate and rename
         run: |
           python3 << 'EOF'
-          import os, re, sys, datetime, calendar, subprocess
+          import os, re, datetime, subprocess, sys
 
           ROOT = os.getcwd()
-          FOLDERS = {
+          today = datetime.date.today()
+          weekday = today.weekday()  # Mon=0
+
+          folders = {
             "dailyPerformance": "day",
             "weeklyPerformance": "week",
             "monthlyPerformance": "month",
             "yearlyPerformance": "year"
           }
 
-          today = datetime.date.today()
-          weekday = today.weekday()  # Mon=0
-
           renamed = []
 
-          for folder, typ in FOLDERS.items():
-            path = os.path.join(ROOT, folder)
-            files = [f for f in os.listdir(path) if f.endswith(".csv")]
+          for folder, ftype in folders.items():
+              path = os.path.join(ROOT, folder)
+              files = [f for f in os.listdir(path) if f.endswith(".csv")]
 
-            # highest serial
-            serials = []
-            for f in files:
-              m = re.match(r"(\d+)\s", f)
-              if m:
-                serials.append(int(m.group(1)))
-            next_serial = max(serials, default=0) + 1
+              serials = []
+              for f in files:
+                  m = re.match(r"(\\d+)\\s", f)
+                  if m:
+                      serials.append(int(m.group(1)))
+              next_serial = max(serials, default=0) + 1
 
-            for f in files:
-              if f == "holdings.csv":
-                if typ == "day" and weekday >= 5:
-                  raise SystemExit("Daily holdings not allowed on weekend")
+              for f in files:
+                  if f == "holdings.csv":
+                      if ftype == "day" and weekday >= 5:
+                          raise SystemExit("Daily holdings not allowed on weekend")
 
-                year = today.year
-                month = today.strftime("%b")
+                      year = today.year
+                      month = today.strftime("%b")
 
-                if typ == "day":
-                  period = f"{today.day}_day"
-                elif typ == "week":
-                  week = (today.day - 1) // 5 + 1
-                  period = f"{week}_week"
-                elif typ == "month":
-                  period = f"{today.month}_month"
-                else:
-                  period = "1_year"
+                      if ftype == "day":
+                          period = f"{today.day}_day"
+                      elif ftype == "week":
+                          week = (today.day - 1) // 5 + 1
+                          period = f"{week}_week"
+                      elif ftype == "month":
+                          period = f"{today.month}_month"
+                      else:
+                          period = "1_year"
 
-                new_name = f"{next_serial} {year} {period} {month}.csv"
+                      new_name = f"{next_serial} {year} {period} {month}.csv"
 
-              else:
-                if re.match(r"\d+\s\d{4}\s", f):
-                  continue  # already proper
-                year, rest = f.split(" ", 1)
-                new_name = f"{next_serial} {year} {rest}"
+                  else:
+                      if re.match(r"\\d+\\s\\d{4}\\s", f):
+                          continue
+                      year, rest = f.split(" ", 1)
+                      new_name = f"{next_serial} {year} {rest}"
 
-              old = os.path.join(path, f)
-              new = os.path.join(path, new_name)
+                  old = os.path.join(path, f)
+                  new = os.path.join(path, new_name)
 
-              if os.path.exists(new):
-                raise SystemExit(f"Duplicate filename: {new_name}")
+                  if os.path.exists(new):
+                      raise SystemExit(f"Duplicate filename: {new_name}")
 
-              os.rename(old, new)
-              renamed.append(f"{folder}/{new_name}")
-              next_serial += 1
+                  os.rename(old, new)
+                  renamed.append(f"{folder}/{new_name}")
+                  next_serial += 1
 
           if renamed:
-            subprocess.run(["git", "add", "-A"])
-            msg = ", ".join(renamed)
-            subprocess.run(["git", "commit", "-m", f"{msg} + Updated + {today.strftime('%d/%m/%Y')}"])
-            subprocess.run(["git", "push"])
+              subprocess.run(["git", "add", "-A"])
+              msg = ", ".join(renamed)
+              subprocess.run(["git", "commit", "-m", f"{msg} + Updated + {today.strftime('%d/%m/%Y')}"])
+              subprocess.run(["git", "push"])
 
-          print("Renamed:", renamed)
+          print("Renamed files:", renamed)
           EOF
 
       # --------------------------------------------------
