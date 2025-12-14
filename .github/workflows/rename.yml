@@ -1,36 +1,32 @@
-name: Commit Engine – File Rename & Validation
+name: Commit Engine File Rename
 
 on:
   push:
-    branches:
-      - "**"
+    branches: ["**"]
 
 jobs:
-  rename-and-validate:
+  rename:
     runs-on: ubuntu-latest
 
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_API:      ${{ secrets.TELEGRAM_API }}
+    permissions:
+      contents: write   # REQUIRED to push rename commit
 
     steps:
-      # -------------------------------------------------------
-      # 1. Checkout repository
-      # -------------------------------------------------------
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # -------------------------------------------------------
-      # 2. Run validation + rename engine
-      # -------------------------------------------------------
-      - name: Validate & Rename CSV Files
+      - name: Rename and validate CSV files
+        env:
+          TELEGRAM_API: ${{ secrets.TELEGRAM_API }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python3 << 'EOF'
           import os, re, sys, datetime, subprocess, requests
 
+          ROOT = os.getcwd()
           today = datetime.date.today()
           weekday = today.weekday()  # Mon=0
           date_str = today.strftime("%d-%b-%Y")
@@ -49,47 +45,43 @@ jobs:
                   os.environ["TELEGRAM_API"] +
                   os.environ["TELEGRAM_BOT_TOKEN"] +
                   "/sendMessage",
-                  data={
-                      "chat_id": os.environ["TELEGRAM_CHAT_ID"],
-                      "text": msg
-                  }
+                  data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
               )
 
           def fail(folder, file, reason):
               send(
                   f"❌ COMMIT REJECTED\n\n"
+                  f"Date: {date_str}\n"
                   f"Folder: {folder}\n"
-                  f"File: {file}\n"
-                  f"Date: {date_str}\n\n"
+                  f"File: {file}\n\n"
                   f"Reason:\n{reason}"
               )
               sys.exit(1)
 
           for folder, ftype in folders.items():
-
-              if not os.path.isdir(folder):
+              path = os.path.join(ROOT, folder)
+              if not os.path.isdir(path):
                   continue
 
-              files = [f for f in os.listdir(folder) if f.endswith(".csv")]
+              files = [f for f in os.listdir(path) if f.lower().endswith(".csv")]
 
-              # highest serial in folder
+              # find highest existing SERIAL (only files that START with serial + year)
               serials = []
               for f in files:
-                  m = re.match(r"(\d+)\s", f)
+                  m = re.match(r"^(\d+)\s\d{4}\s", f)
                   if m:
                       serials.append(int(m.group(1)))
-
               next_serial = max(serials, default=0) + 1
+
               periods_seen = set()
 
               for f in files:
-                  full = os.path.join(folder, f)
+                  full = os.path.join(path, f)
 
-                  # ---------------- HOLDINGS ----------------
+                  # ---- HOLDINGS ----
                   if f.lower() == "holdings.csv":
-
                       if ftype == "day" and weekday >= 5:
-                          fail(folder, f, "Daily holdings not allowed on weekends")
+                          fail(folder, f, "Daily holdings not allowed on weekend")
 
                       year = today.year
                       month = today.strftime("%b")
@@ -103,50 +95,49 @@ jobs:
                       else:
                           period = "1_year"
 
-                  # ---------------- MISSING FILE ----------------
-                  elif re.match(r"\d{4}\s", f):
-                      parts = f.replace(".csv", "").split()
-                      if len(parts) != 3:
-                          fail(folder, f, "Invalid missing file format")
+                  # ---- MISSING FILE (NO SERIAL, YEAR FIRST) ----
+                  elif re.match(r"^\d{4}\s\d+_(day|week|month|year)\s[a-zA-Z]+\.csv$", f):
+                      year, period, month = f.replace(".csv","").split()
 
-                      year, period, month = parts
-
-                  # ---------------- ALREADY VALID ----------------
-                  elif re.match(r"\d+\s\d{4}\s", f):
+                  # ---- ALREADY VALID ----
+                  elif re.match(r"^\d+\s\d{4}\s\d+_(day|week|month|year)\s[a-zA-Z]+\.csv$", f):
                       continue
 
-                  # ---------------- INVALID ----------------
                   else:
                       fail(folder, f, "Invalid filename format")
 
                   key = f"{year}_{period}_{month}"
                   if key in periods_seen:
                       fail(folder, f, "Duplicate time period detected")
-
                   periods_seen.add(key)
 
                   new_name = f"{next_serial} {year} {period} {month}.csv"
-                  new_path = os.path.join(folder, new_name)
+                  new_path = os.path.join(path, new_name)
 
                   if os.path.exists(new_path):
-                      fail(folder, new_name, "Duplicate final filename")
+                      fail(folder, new_name, "Final filename already exists")
 
                   os.rename(full, new_path)
                   renamed.append(f"{folder}/{new_name}")
                   next_serial += 1
 
-          if renamed:
-              subprocess.run(["git", "add", "-A"])
-              subprocess.run([
-                  "git", "commit",
-                  "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"
-              ])
-              subprocess.run(["git", "push"])
+          if not renamed:
+              print("No files renamed.")
+              sys.exit(0)
 
-              send(
-                  f"✅ COMMIT SUCCESSFUL\n\n"
-                  f"Date: {date_str}\n\n"
-                  f"Files processed:\n" +
-                  "\n".join(renamed)
-              )
+          # COMMIT & PUSH
+          subprocess.run(["git", "config", "user.name", "GitHub Actions"], check=True)
+          subprocess.run(["git", "config", "user.email", "actions@github.com"], check=True)
+          subprocess.run(["git", "add", "-A"], check=True)
+          subprocess.run(
+              ["git", "commit", "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"],
+              check=True
+          )
+          subprocess.run(["git", "push"], check=True)
+
+          send(
+              f"✅ COMMIT SUCCESSFUL\n\n"
+              f"Date: {date_str}\n\n"
+              f"Files renamed:\n" + "\n".join(renamed)
+          )
           EOF
