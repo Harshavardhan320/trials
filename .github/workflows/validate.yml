@@ -1,4 +1,4 @@
-name: Performance File Validator & Renamer
+name: Commit Engine – File Rename & Validation
 
 on:
   push:
@@ -6,226 +6,147 @@ on:
       - "**"
 
 jobs:
-  validate:
+  rename-and-validate:
     runs-on: ubuntu-latest
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_API:       ${{ secrets.TELEGRAM_API }}
+      TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_API:      ${{ secrets.TELEGRAM_API }}
 
     steps:
-      # --------------------------------------------------
-      # 1️⃣ CHECKOUT
-      # --------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # -------------------------------------------------------
+      # 1. Checkout repository
+      # -------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      # --------------------------------------------------
-      # 2️⃣ DETECT RELEVANT FOLDER CHANGES
-      # --------------------------------------------------
-      - name: Detect performance folder changes
-        id: detect
-        run: |
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            FILES=$(git diff --name-only HEAD~1 HEAD)
-          else
-            FILES=$(git diff --name-only --cached)
-          fi
-
-          RUN=false
-          for f in dailyPerformance weeklyPerformance monthlyPerformance yearlyPerformance; do
-            if echo "$FILES" | grep -q "^$f/"; then
-              RUN=true
-              break
-            fi
-          done
-
-          echo "run=$RUN" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------
-      # 3️⃣ STOP IF NOT RELATED
-      # --------------------------------------------------
-      - name: Stop workflow if not related
-        if: steps.detect.outputs.run == 'false'
-        run: |
-          echo "No performance folders touched. Workflow stopped."
-          exit 0
-
-      # --------------------------------------------------
-      # 4️⃣ BLOCK IF PR EXISTS
-      # --------------------------------------------------
-      - name: Block commit if PR exists
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # -------------------------------------------------------
+      # 2. Run validation + rename engine
+      # -------------------------------------------------------
+      - name: Validate & Rename CSV Files
         run: |
           python3 << 'EOF'
-          import requests, os, sys
+          import os, re, sys, datetime, subprocess, requests
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ["GITHUB_TOKEN"]
+          today = datetime.date.today()
+          weekday = today.weekday()  # Mon=0
+          date_str = today.strftime("%d-%b-%Y")
 
-          headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json"
+          folders = {
+            "dailyPerformance": "day",
+            "weeklyPerformance": "week",
+            "monthlyPerformance": "month",
+            "yearlyPerformance": "year"
           }
 
-          folders = [
-            "dailyPerformance/",
-            "weeklyPerformance/",
-            "monthlyPerformance/",
-            "yearlyPerformance/"
-          ]
+          renamed = []
 
-          prs = requests.get(
-            f"https://api.github.com/repos/{repo}/pulls?state=open",
-            headers=headers
-          ).json()
-
-          for pr in prs:
-            files = requests.get(pr["url"] + "/files", headers=headers).json()
-            for f in files:
-              for folder in folders:
-                if f["filename"].startswith(folder):
-                  msg = (
-                    "❌ COMMIT REJECTED\n\n"
-                    "Reason: Existing Pull Request already modifies performance folders.\n"
-                    "Action: Merge or close the PR before committing again."
-                  )
-                  requests.post(
-                    os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
-                    data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
-                  )
-                  sys.exit(0)
-          EOF
-
-      # --------------------------------------------------
-      # 5️⃣ VALIDATE, RENAME, ASSIGN SERIALS (SAFE)
-      # --------------------------------------------------
-      - name: Validate & rename files
-        run: |
-          python3 << 'EOF'
-          import os, re, datetime, subprocess, sys, requests
-
-          try:
-            today = datetime.date.today()
-            weekday = today.weekday()
-            date_str = today.strftime("%d-%b-%Y")
-
-            folders = {
-              "dailyPerformance": "day",
-              "weeklyPerformance": "week",
-              "monthlyPerformance": "month",
-              "yearlyPerformance": "year"
-            }
-
-            renamed = []
-
-            def send(msg):
+          def send(msg):
               requests.post(
-                os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
-                data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
+                  os.environ["TELEGRAM_API"] +
+                  os.environ["TELEGRAM_BOT_TOKEN"] +
+                  "/sendMessage",
+                  data={
+                      "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+                      "text": msg
+                  }
               )
 
-            def fail(folder, file, reason):
+          def fail(folder, file, reason):
               send(
-                f"❌ COMMIT REJECTED\n\n"
-                f"Folder: {folder}\n"
-                f"File: {file}\n"
-                f"Date: {date_str}\n\n"
-                f"Reason:\n{reason}"
+                  f"❌ COMMIT REJECTED\n\n"
+                  f"Folder: {folder}\n"
+                  f"File: {file}\n"
+                  f"Date: {date_str}\n\n"
+                  f"Reason:\n{reason}"
               )
               sys.exit(1)
 
-            for folder, ftype in folders.items():
+          for folder, ftype in folders.items():
 
-              # 🔒 SAFETY: skip if folder missing
               if not os.path.isdir(folder):
-                continue
+                  continue
 
               files = [f for f in os.listdir(folder) if f.endswith(".csv")]
 
-              # highest serial
+              # highest serial in folder
               serials = []
               for f in files:
-                m = re.match(r"(\\d+)\\s", f)
-                if m:
-                  serials.append(int(m.group(1)))
-              next_serial = max(serials, default=0) + 1
+                  m = re.match(r"(\d+)\s", f)
+                  if m:
+                      serials.append(int(m.group(1)))
 
+              next_serial = max(serials, default=0) + 1
               periods_seen = set()
 
               for f in files:
-                full = os.path.join(folder, f)
+                  full = os.path.join(folder, f)
 
-                # -------- HOLDINGS --------
-                if f.lower() == "holdings.csv":
-                  if ftype == "day" and weekday >= 5:
-                    fail(folder, f, "Daily holdings upload not allowed on weekends.")
+                  # ---------------- HOLDINGS ----------------
+                  if f.lower() == "holdings.csv":
 
-                  year = today.year
-                  month = today.strftime("%b")
+                      if ftype == "day" and weekday >= 5:
+                          fail(folder, f, "Daily holdings not allowed on weekends")
 
-                  if ftype == "day":
-                    period = f"{today.day}_day"
-                  elif ftype == "week":
-                    period = f"{(today.day - 1)//5 + 1}_week"
-                  elif ftype == "month":
-                    period = f"{today.month}_month"
+                      year = today.year
+                      month = today.strftime("%b")
+
+                      if ftype == "day":
+                          period = f"{today.day}_day"
+                      elif ftype == "week":
+                          period = f"{(today.day - 1)//5 + 1}_week"
+                      elif ftype == "month":
+                          period = f"{today.month}_month"
+                      else:
+                          period = "1_year"
+
+                  # ---------------- MISSING FILE ----------------
+                  elif re.match(r"\d{4}\s", f):
+                      parts = f.replace(".csv", "").split()
+                      if len(parts) != 3:
+                          fail(folder, f, "Invalid missing file format")
+
+                      year, period, month = parts
+
+                  # ---------------- ALREADY VALID ----------------
+                  elif re.match(r"\d+\s\d{4}\s", f):
+                      continue
+
+                  # ---------------- INVALID ----------------
                   else:
-                    period = "1_year"
+                      fail(folder, f, "Invalid filename format")
 
-                # -------- MISSING FILE (KEEP DATE) --------
-                elif re.match(r"\\d{4}\\s", f):
-                  parts = f.replace(".csv", "").split()
-                  if len(parts) != 3:
-                    fail(folder, f, "Invalid missing file structure.")
-                  year, period, month = parts
+                  key = f"{year}_{period}_{month}"
+                  if key in periods_seen:
+                      fail(folder, f, "Duplicate time period detected")
 
-                # -------- ALREADY VALID --------
-                elif re.match(r"\\d+\\s\\d{4}\\s", f):
-                  continue
+                  periods_seen.add(key)
 
-                else:
-                  fail(folder, f, "Invalid filename format.")
+                  new_name = f"{next_serial} {year} {period} {month}.csv"
+                  new_path = os.path.join(folder, new_name)
 
-                key = f"{year}_{period}_{month}"
-                if key in periods_seen:
-                  fail(folder, f, "Duplicate time period detected.")
-                periods_seen.add(key)
+                  if os.path.exists(new_path):
+                      fail(folder, new_name, "Duplicate final filename")
 
-                new_name = f"{next_serial} {year} {period} {month}.csv"
+                  os.rename(full, new_path)
+                  renamed.append(f"{folder}/{new_name}")
+                  next_serial += 1
 
-                if os.path.exists(os.path.join(folder, new_name)):
-                  fail(folder, new_name, "Duplicate final filename.")
-
-                os.rename(full, os.path.join(folder, new_name))
-                renamed.append(f"{folder}/{new_name}")
-                next_serial += 1
-
-            if renamed:
+          if renamed:
               subprocess.run(["git", "add", "-A"])
               subprocess.run([
-                "git", "commit",
-                "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"
+                  "git", "commit",
+                  "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"
               ])
               subprocess.run(["git", "push"])
 
               send(
-                f"✅ COMMIT SUCCESSFUL\n\n"
-                f"Date: {date_str}\n\n"
-                f"Files processed:\n" + "\n".join(renamed)
+                  f"✅ COMMIT SUCCESSFUL\n\n"
+                  f"Date: {date_str}\n\n"
+                  f"Files processed:\n" +
+                  "\n".join(renamed)
               )
-
-          except Exception as e:
-            requests.post(
-              os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
-              data={
-                "chat_id": os.environ["TELEGRAM_CHAT_ID"],
-                "text": f"❌ INTERNAL SCRIPT ERROR\n\n{str(e)}"
-              }
-            )
-            sys.exit(1)
           EOF
