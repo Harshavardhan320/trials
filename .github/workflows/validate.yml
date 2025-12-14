@@ -24,9 +24,9 @@ jobs:
           fetch-depth: 0
 
       # --------------------------------------------------
-      # 2️⃣ DETECT IF ANY PERFORMANCE FOLDER IS TOUCHED
+      # 2️⃣ CHECK IF ANY TARGET FOLDER IS TOUCHED
       # --------------------------------------------------
-      - name: Detect relevant folder changes
+      - name: Detect performance folder changes
         id: detect
         run: |
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
@@ -35,12 +35,10 @@ jobs:
             FILES=$(git diff --name-only --cached)
           fi
 
-          echo "$FILES"
-
-          RUN="false"
+          RUN=false
           for f in dailyPerformance weeklyPerformance monthlyPerformance yearlyPerformance; do
             if echo "$FILES" | grep -q "^$f/"; then
-              RUN="true"
+              RUN=true
               break
             fi
           done
@@ -48,18 +46,20 @@ jobs:
           echo "run=$RUN" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------
-      # 3️⃣ IF NOT RELATED → STOP COMPLETELY
+      # 3️⃣ STOP WORKFLOW IF NOT RELATED
       # --------------------------------------------------
-      - name: Skip workflow (no performance folders)
+      - name: Stop workflow (not related)
         if: steps.detect.outputs.run == 'false'
         run: |
-          echo "No performance folder touched. Workflow stopped."
+          echo "No performance folders touched. Workflow stopped."
           exit 0
 
       # --------------------------------------------------
-      # 4️⃣ BLOCK IF PR EXISTS FOR ANY PERFORMANCE FOLDER
+      # 4️⃣ BLOCK IF ANY OPEN PR TOUCHES PERFORMANCE FOLDERS
       # --------------------------------------------------
-      - name: Block if PR exists
+      - name: Block commit if PR exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 << 'EOF'
           import requests, os, sys
@@ -90,9 +90,9 @@ jobs:
               for folder in folders:
                 if f["filename"].startswith(folder):
                   msg = (
-                    "❌ COMMIT REJECTED — EXISTING PR FOUND\n\n"
-                    "Another Pull Request already modifies performance folders.\n"
-                    "Please merge or close it before committing new files."
+                    "❌ COMMIT REJECTED\n\n"
+                    "Reason: Existing Pull Request modifies performance folders.\n"
+                    "Action: Merge or close the PR before committing again."
                   )
                   requests.post(
                     os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
@@ -100,13 +100,11 @@ jobs:
                   )
                   sys.exit(0)
           EOF
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # --------------------------------------------------
-      # 5️⃣ VALIDATION + RENAME + SERIAL ASSIGNMENT
+      # 5️⃣ VALIDATE, RENAME, ASSIGN SERIALS
       # --------------------------------------------------
-      - name: Validate, rename & assign serial numbers
+      - name: Validate & rename files
         run: |
           python3 << 'EOF'
           import os, re, datetime, subprocess, sys, requests
@@ -124,44 +122,41 @@ jobs:
 
           renamed = []
 
-          def fail(msg):
+          def send(msg):
             requests.post(
               os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
               data={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg}
             )
+
+          def fail(folder, file, reason):
+            send(
+              f"❌ COMMIT REJECTED\n\n"
+              f"Folder: {folder}\n"
+              f"File: {file}\n"
+              f"Date: {date_str}\n\n"
+              f"Reason:\n{reason}"
+            )
             sys.exit(1)
 
           for folder, ftype in folders.items():
-            path = folder
-            files = [f for f in os.listdir(path) if f.endswith(".csv")]
+            files = [f for f in os.listdir(folder) if f.endswith(".csv")]
 
-            # collect serials
             serials = []
             for f in files:
               m = re.match(r"(\\d+)\\s", f)
               if m:
                 serials.append(int(m.group(1)))
-
             next_serial = max(serials, default=0) + 1
 
-            periods_seen = set()
+            periods = set()
 
             for f in files:
-              full = os.path.join(path, f)
+              full = os.path.join(folder, f)
 
-              # INVALID EXTENSION
-              if not f.endswith(".csv"):
-                fail(f"❌ INVALID FILE EXTENSION\n\nFolder: {folder}\nFile: {f}")
-
-              # HOLDINGS
+              # ---- HOLDINGS ----
               if f.lower() == "holdings.csv":
                 if ftype == "day" and weekday >= 5:
-                  fail(
-                    f"❌ DAILY HOLDINGS UPLOAD BLOCKED\n\n"
-                    f"Folder: {folder}\n"
-                    f"Date: {date_str}\n"
-                    f"Reason: Weekend uploads are not allowed."
-                  )
+                  fail(folder, f, "Daily holdings upload not allowed on weekends.")
 
                 year = today.year
                 month = today.strftime("%b")
@@ -175,58 +170,43 @@ jobs:
                 else:
                   period = "1_year"
 
-                key = f"{year}_{period}_{month}"
-                if key in periods_seen:
-                  fail(f"❌ DUPLICATE TIME PERIOD\n\nFolder: {folder}\nPeriod: {key}")
-                periods_seen.add(key)
+              # ---- MISSING FILE ----
+              elif re.match(r"\\d{4}\\s", f):
+                year, rest = f.split(" ", 1)
+                period = rest.split()[0]
 
-                new_name = f"{next_serial} {year} {period} {month}.csv"
+              # ---- ALREADY VALID ----
+              elif re.match(r"\\d+\\s\\d{4}\\s", f):
+                continue
 
               else:
-                # INVALID FORMAT
-                if not re.match(r"(\\d{4}|\\d+\\s\\d{4})", f):
-                  fail(
-                    f"❌ INVALID FILE FORMAT\n\n"
-                    f"Folder: {folder}\n"
-                    f"File: {f}"
-                  )
+                fail(folder, f, "Invalid filename format.")
 
-                if re.match(r"\\d+\\s\\d{4}", f):
-                  continue  # already valid
+              key = f"{year}_{period}"
+              if key in periods:
+                fail(folder, f, "Duplicate time period detected.")
+              periods.add(key)
 
-                year, rest = f.split(" ", 1)
-                new_name = f"{next_serial} {year} {rest}"
+              new_name = f"{next_serial} {year} {period} {today.strftime('%b')}.csv"
 
-              if os.path.exists(os.path.join(path, new_name)):
-                fail(
-                  f"❌ DUPLICATE FINAL NAME\n\n"
-                  f"Folder: {folder}\n"
-                  f"File: {new_name}"
-                )
+              if os.path.exists(os.path.join(folder, new_name)):
+                fail(folder, new_name, "Duplicate final filename.")
 
-              os.rename(full, os.path.join(path, new_name))
+              os.rename(full, os.path.join(folder, new_name))
               renamed.append(f"{folder}/{new_name}")
               next_serial += 1
 
           if renamed:
             subprocess.run(["git", "add", "-A"])
-            msg = ", ".join(renamed)
             subprocess.run([
               "git", "commit",
-              "-m", f"{msg} + Updated + {today.strftime('%d/%m/%Y')}"
+              "-m", f"{', '.join(renamed)} + Updated + {today.strftime('%d/%m/%Y')}"
             ])
             subprocess.run(["git", "push"])
 
-            requests.post(
-              os.environ["TELEGRAM_API"] + os.environ["TELEGRAM_BOT_TOKEN"] + "/sendMessage",
-              data={
-                "chat_id": os.environ["TELEGRAM_CHAT_ID"],
-                "text": (
-                  "✅ COMMIT SUCCESSFUL\n\n"
-                  f"Date: {date_str}\n\n"
-                  "Files renamed & serial numbers assigned:\n" +
-                  "\n".join(renamed)
-                )
-              }
+            send(
+              f"✅ COMMIT SUCCESSFUL\n\n"
+              f"Date: {date_str}\n\n"
+              f"Files processed:\n" + "\n".join(renamed)
             )
           EOF
