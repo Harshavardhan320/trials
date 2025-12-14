@@ -16,17 +16,17 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # 1️⃣ CHECKOUT CODE
+      # 1️⃣ CHECKOUT
       # --------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # --------------------------------------------------
-      # 2️⃣ CHECK IF ANY TARGET FOLDER IS TOUCHED
+      # 2️⃣ DETECT TARGET FOLDER CHANGES
       # --------------------------------------------------
-      - name: Detect performance folder changes
+      - name: Detect folder changes
         id: detect
         run: |
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
@@ -46,18 +46,18 @@ jobs:
           echo "run=$RUN" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------
-      # 3️⃣ STOP WORKFLOW IF NOT RELATED
+      # 3️⃣ STOP IF NOT RELEVANT
       # --------------------------------------------------
-      - name: Stop workflow (not related)
+      - name: Stop workflow
         if: steps.detect.outputs.run == 'false'
         run: |
           echo "No performance folders touched. Workflow stopped."
           exit 0
 
       # --------------------------------------------------
-      # 4️⃣ BLOCK IF ANY OPEN PR TOUCHES PERFORMANCE FOLDERS
+      # 4️⃣ BLOCK IF PR EXISTS
       # --------------------------------------------------
-      - name: Block commit if PR exists
+      - name: Block if PR exists
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -91,7 +91,7 @@ jobs:
                 if f["filename"].startswith(folder):
                   msg = (
                     "❌ COMMIT REJECTED\n\n"
-                    "Reason: Existing Pull Request modifies performance folders.\n"
+                    "Reason: Existing PR modifies performance folders.\n"
                     "Action: Merge or close the PR before committing again."
                   )
                   requests.post(
@@ -104,13 +104,13 @@ jobs:
       # --------------------------------------------------
       # 5️⃣ VALIDATE, RENAME, ASSIGN SERIALS
       # --------------------------------------------------
-      - name: Validate & rename files
+      - name: Validate & rename
         run: |
           python3 << 'EOF'
           import os, re, datetime, subprocess, sys, requests
 
           today = datetime.date.today()
-          weekday = today.weekday()  # Mon=0
+          weekday = today.weekday()
           date_str = today.strftime("%d-%b-%Y")
 
           folders = {
@@ -141,6 +141,7 @@ jobs:
           for folder, ftype in folders.items():
             files = [f for f in os.listdir(folder) if f.endswith(".csv")]
 
+            # find highest serial
             serials = []
             for f in files:
               m = re.match(r"(\\d+)\\s", f)
@@ -148,12 +149,12 @@ jobs:
                 serials.append(int(m.group(1)))
             next_serial = max(serials, default=0) + 1
 
-            periods = set()
+            periods_seen = set()
 
             for f in files:
               full = os.path.join(folder, f)
 
-              # ---- HOLDINGS ----
+              # ---------- HOLDINGS ----------
               if f.lower() == "holdings.csv":
                 if ftype == "day" and weekday >= 5:
                   fail(folder, f, "Daily holdings upload not allowed on weekends.")
@@ -170,24 +171,26 @@ jobs:
                 else:
                   period = "1_year"
 
-              # ---- MISSING FILE ----
+              # ---------- MISSING FILE (KEEP ITS OWN DATE) ----------
               elif re.match(r"\\d{4}\\s", f):
-                year, rest = f.split(" ", 1)
-                period = rest.split()[0]
+                parts = f.replace(".csv", "").split()
+                year = parts[0]
+                period = parts[1]
+                month = parts[2]
 
-              # ---- ALREADY VALID ----
+              # ---------- ALREADY VALID ----------
               elif re.match(r"\\d+\\s\\d{4}\\s", f):
                 continue
 
               else:
                 fail(folder, f, "Invalid filename format.")
 
-              key = f"{year}_{period}"
-              if key in periods:
-                fail(folder, f, "Duplicate time period detected.")
-              periods.add(key)
+              key = f"{year}_{period}_{month}"
+              if key in periods_seen:
+                fail(folder, f, "Duplicate time period.")
+              periods_seen.add(key)
 
-              new_name = f"{next_serial} {year} {period} {today.strftime('%b')}.csv"
+              new_name = f"{next_serial} {year} {period} {month}.csv"
 
               if os.path.exists(os.path.join(folder, new_name)):
                 fail(folder, new_name, "Duplicate final filename.")
